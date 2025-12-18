@@ -1,35 +1,101 @@
 import torch
-from IPython.display import Audio, Video
 import torchaudio
-
+import requests
+import os
+import sys
+import argparse
+import tempfile
+from pathlib import Path
 from sam_audio import SAMAudio, SAMAudioProcessor
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#model = SAMAudio.from_pretrained("facebook/sam-audio-3b").to(device).eval()
-model = SAMAudio.from_pretrained("facebook/sam-audio-large").to(device).eval()
-#processor = SAMAudioProcessor.from_pretrained("facebook/sam-audio-3b")
-processor = SAMAudioProcessor.from_pretrained("facebook/sam-audio-large")
-video_file = "/gorgon/ia/sam-audio/examples/assets/office.mp4"
-Video(video_file, embed=True, width=640, height=360)
-inputs = processor(audios=[video_file], descriptions=["A man speaking"]).to(device)
-with torch.inference_mode():
-    result = model.separate(inputs)
-# Audio(result.target[0].cpu(), rate=processor.audio_sampling_rate)
 
-# 1. Recupera il tensore dell'audio (target[0]) e portalo sulla CPU
-audio_tensor = result.target[0].cpu()
+def run_separation():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Path locale o URL (mp3/mp4)")
+    parser.add_argument("--prompt", required=True, help="Prompt")
+    parser.add_argument("--output", default="output.wav", help="Output")
+    parser.add_argument("--model", default="facebook/sam-audio-large")
+    args = parser.parse_args()
 
-# 2. Torchaudio si aspetta un tensore con forma [canali, campioni]
-# Se il tensore è 1D (mono), aggiungiamo una dimensione
-if audio_tensor.ndim == 1:
-    audio_tensor = audio_tensor.unsqueeze(0)
+    # --- GPU STRICT ---
+    if not torch.cuda.is_available():
+        print("❌ ERRORE: CUDA non trovata. Esco.")
+        sys.exit(1)
+    
+    device = torch.device("cuda")
+    print(f"[*] Utilizzo GPU: {torch.cuda.get_device_name(0)}")
 
-# 3. Definisci il nome del file e salva
-output_filename = "audio_separato.wav"
-sample_rate = processor.audio_sampling_rate
+    try:
+        # 1. Caricamento Modello
+        print(f"[*] Caricamento modello {args.model}...")
+        model = SAMAudio.from_pretrained(args.model).to(device).eval()
+        processor = SAMAudioProcessor.from_pretrained(args.model)
+        target_sr = processor.audio_sampling_rate
 
-torchaudio.save(output_filename, audio_tensor, sample_rate)
+        # 2. Gestione Input (Download se URL)
+        input_path = args.input
+        if input_path.startswith("http"):
+            print("[*] Download file da URL...")
+            r = requests.get(input_path)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(input_path).suffix) as f:
+                f.write(r.content)
+                input_path = f.name
 
-print(f"File salvato con successo: {output_filename}")
+        # 3. PRE-PROCESSING MANUALE (La chiave per risolvere il silenzio dell'MP3)
+        # Carichiamo con torchaudio che è molto più potente del loader interno
+        print(f"[*] Pre-elaborazione audio...")
+        waveform, sr = torchaudio.load(input_path)
+        
+        # Mixdown a Mono se Stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+        # Resampling alla frequenza del modello
+        if sr != target_sr:
+            resampler = torchaudio.transforms.Resample(sr, target_sr)
+            waveform = resampler(waveform)
+        
+        # Normalizzazione picco a 0.9 per evitare clipping o segnali troppo deboli
+        waveform = waveform / (waveform.abs().max() + 1e-8) * 0.9
+        
+        # SALVATAGGIO IN WAV TEMPORANEO "PULITO"
+        # Questo garantisce che il processor legga un file che capisce al 100%
+        temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        torchaudio.save(temp_wav.name, waveform, target_sr)
+        temp_wav.close()
+        
+        print(f"[+] Audio normalizzato e pronto ({target_sr}Hz, Mono)")
 
-# Opzionale: continua a visualizzare il player nel notebook
-Audio(audio_tensor.numpy(), rate=sample_rate)
+        # 4. Inferenza
+        print(f"[*] Separazione con prompt: '{args.prompt}'...")
+        # Passiamo il path del WAV temporaneo
+        inputs = processor(audios=[temp_wav.name], descriptions=[args.prompt]).to(device)
+        
+        with torch.inference_mode():
+            result = model.separate(inputs)
+
+        # 5. Salvataggio Finale
+        output_tensor = result.target[0].cpu()
+        if output_tensor.ndim == 1:
+            output_tensor = output_tensor.unsqueeze(0)
+
+        # Controllo energia finale
+        energy = output_tensor.abs().max().item()
+        if energy < 1e-5:
+            print("⚠️ ATTENZIONE: Il modello ha restituito silenzio totale.")
+            print("Sperimenta con un prompt più semplice (es. 'human voice' invece di 'a man speaking').")
+        else:
+            print(f"[+] Segnale generato (Ampiezza picco: {energy:.4f})")
+
+        torchaudio.save(args.output, output_tensor, target_sr)
+        print(f"[✅] COMPLETATO: {args.output}")
+
+        # Pulizia
+        if os.path.exists(temp_wav.name): os.remove(temp_wav.name)
+        if "tempfile" in input_path: os.remove(input_path)
+
+    except Exception as e:
+        print(f"❌ Errore critico: {e}")
+        raise e
+
+if __name__ == "__main__":
+    run_separation()
