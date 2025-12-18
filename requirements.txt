@@ -1,0 +1,13 @@
+audiobox_aesthetics
+einops
+numpy
+pydub
+torch
+torchaudio
+torchcodec
+torchdiffeq
+torchvision
+transformers>=4.54.0
+ipython
+perception-models @ git+https://github.com/facebookresearch/perception_models@unpin-deps
+sam-audio @ git+https://github.com/facebookresearch/sam-audio.git
