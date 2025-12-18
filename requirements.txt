@@ -4,9 +4,10 @@ numpy
 pydub
 torch
 torchaudio
-torchcodec
 torchdiffeq
 torchvision
+decord @ https://github.com/mamorett/Nvidia-DGX-prebuild-wheels/releases/download/1.1/decord-0.6.0-cp312-cp312-linux_aarch64.whl
+torchcodec @ https://github.com/mamorett/Nvidia-DGX-prebuild-wheels/releases/download/1.1/torchcodec-0.10.0a0-cp312-cp312-linux_aarch64.whl
 transformers>=4.54.0
 ipython
 perception-models @ git+https://github.com/facebookresearch/perception_models@unpin-deps
